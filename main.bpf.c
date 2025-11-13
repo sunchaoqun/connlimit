@@ -29,7 +29,7 @@
 
 #include "main.h"
  
-#define MAX_CONN_PER_TARGET 100
+#define MAX_CONN_PER_TARGET 200
 #define TARGET_PORT 9015
  
 struct {
