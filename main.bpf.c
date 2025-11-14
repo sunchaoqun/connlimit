@@ -39,6 +39,29 @@ struct {
     __type(value, __u64); // 当前连接数（需要 64-bit 支持原子操作）
 } conn_count_map SEC(".maps");
 
+// 统计指标
+enum {
+    ST_TOTAL = 0,
+    ST_PASS = 1,
+    ST_DROP = 2,
+    ST_TIMEOUT_CLEAN = 3,   // 超时清理的连接数
+    ST_PASS_SYN = 4,
+    ST_PASS_ACK = 5,
+    ST_PASS_FIN_RST = 6,
+    ST_PASS_OTHER = 7,
+    ST_DROP_SYN = 8,
+    ST_DROP_ACK = 9,
+    ST_DROP_OTHER = 10,
+    ST_MAX
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, ST_MAX);
+    __type(key, __u32);
+    __type(value, __u64);
+} xdp_stats SEC(".maps");
+
 // 连接状态追踪表：记录每个连接的状态
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -53,6 +76,14 @@ struct {
     __uint(max_entries, 256 * 1024);
 } events SEC(".maps");
  
+// 更新统计
+static __always_inline void stats_inc(__u32 idx)
+{
+    __u64 *val = bpf_map_lookup_elem(&xdp_stats, &idx);
+    if (val)
+        __sync_fetch_and_add(val, 1);
+}
+
 SEC("xdp")
 int xdp_connlimit_prog(struct xdp_md *ctx)
 {
@@ -85,6 +116,8 @@ int xdp_connlimit_prog(struct xdp_md *ctx)
     if (!is_to_server && !is_from_server)
         return XDP_PASS;
  
+    stats_inc(ST_TOTAL);
+
     // 服务器 IP：如果是去往服务器，则 dst_ip；如果是从服务器返回，则 src_ip
     __u32 server_ip = is_to_server ? ip->daddr : ip->saddr;
     __u32 client_ip = is_to_server ? ip->saddr : ip->daddr;
@@ -129,6 +162,8 @@ int xdp_connlimit_prog(struct xdp_md *ctx)
                 evt->tcp_flags = 0x02;
                 bpf_ringbuf_submit(evt, 0);
             }
+            stats_inc(ST_DROP);
+            stats_inc(ST_DROP_SYN);
             return XDP_DROP;
         }
         
@@ -138,6 +173,8 @@ int xdp_connlimit_prog(struct xdp_md *ctx)
             .state = CONN_STATE_SYN_RECV,
         };
         bpf_map_update_elem(&conn_state_map, &tuple, &syn_state, BPF_ANY);
+        stats_inc(ST_PASS);
+        stats_inc(ST_PASS_SYN);
         return XDP_PASS;
     }
     
@@ -167,6 +204,8 @@ int xdp_connlimit_prog(struct xdp_md *ctx)
                     evt->tcp_flags = 0x10; // ACK
                     bpf_ringbuf_submit(evt, 0);
                 }
+                stats_inc(ST_DROP);
+                stats_inc(ST_DROP_ACK);
                 return XDP_DROP;
             }
             
@@ -188,6 +227,8 @@ int xdp_connlimit_prog(struct xdp_md *ctx)
                     evt->tcp_flags = 0x10; // ACK
                     bpf_ringbuf_submit(evt, 0);
                 }
+                stats_inc(ST_DROP);
+                stats_inc(ST_DROP_ACK);
                 return XDP_DROP;
             }
             __u32 new_count = (__u32)(prev + 1);
@@ -209,6 +250,8 @@ int xdp_connlimit_prog(struct xdp_md *ctx)
                 bpf_ringbuf_submit(evt, 0);
             }
         }
+        stats_inc(ST_PASS);
+        stats_inc(ST_PASS_ACK);
         return XDP_PASS;
     }
  
@@ -247,6 +290,8 @@ int xdp_connlimit_prog(struct xdp_md *ctx)
             // 半开连接关闭，从 SYN 表中清理（如果存在）
             bpf_map_delete_elem(&conn_state_map, &tuple);
         }
+        stats_inc(ST_PASS);
+        stats_inc(ST_PASS_FIN_RST);
         return XDP_PASS;
     }
  
@@ -254,6 +299,8 @@ int xdp_connlimit_prog(struct xdp_md *ctx)
     if (state)
         state->last_seen_ns = now;
 
+    stats_inc(ST_PASS);
+    stats_inc(ST_PASS_OTHER);
     return XDP_PASS;
 }
  
@@ -291,6 +338,7 @@ static __always_inline bool is_terminal_state(int state)
     }
 }
 
+// 更新统计
 SEC("tracepoint/sock/inet_sock_set_state")
 int handle_tcp_state(struct inet_sock_set_state_args *ctx)
 {
@@ -348,6 +396,7 @@ int handle_tcp_state(struct inet_sock_set_state_args *ctx)
             evt->tcp_flags = 0; // 由状态回收，非 FIN/RST
             bpf_ringbuf_submit(evt, 0);
         }
+        stats_inc(ST_TIMEOUT_CLEAN);
     }
 
     return 0;
@@ -423,6 +472,7 @@ int handle_tcp_destroy(struct tcp_destroy_sock_args *ctx)
             evt->tcp_flags = 0;
             bpf_ringbuf_submit(evt, 0);
         }
+        stats_inc(ST_TIMEOUT_CLEAN);
     }
 
     return 0;
