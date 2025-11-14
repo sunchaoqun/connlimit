@@ -48,10 +48,10 @@ enum {
     ST_PASS_SYN = 4,
     ST_PASS_ACK = 5,
     ST_PASS_FIN_RST = 6,
-    ST_PASS_OTHER = 7,
-    ST_DROP_SYN = 8,
-    ST_DROP_ACK = 9,
-    ST_DROP_OTHER = 10,
+    ST_DROP_SYN = 7,
+    ST_DROP_ACK = 8,
+    // ST_DROP_OTHER = 9,
+    // ST_PASS_OTHER = 10,
     ST_MAX
 };
 
@@ -300,7 +300,7 @@ int xdp_connlimit_prog(struct xdp_md *ctx)
         state->last_seen_ns = now;
 
     stats_inc(ST_PASS);
-    stats_inc(ST_PASS_OTHER);
+    // stats_inc(ST_PASS_OTHER);
     return XDP_PASS;
 }
  
